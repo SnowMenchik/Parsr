@@ -4,12 +4,12 @@ import os
 import asyncio
 import time
 import json
-from typing import List, Dict
+from typing import List, Dict, Optional
 from bs4 import BeautifulSoup
 from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError, ChannelPrivateError, SessionPasswordNeededError
-from telethon.tl.functions.messages import GetMessagesViewsRequest
 import hashlib
+import urllib.parse
 
 class ConfigManager:
     """Менеджер конфигурации для хранения данных"""
@@ -90,11 +90,11 @@ class ConfigManager:
         return bool(token and token.strip())
     
     def has_ok_creds(self):
-        """Проверяет наличие OK.ru данных - для API нужны application_key и session_secret_key"""
-        return all([
-            self.get('ok_application_key'),
+        """Проверяет наличие OK.ru данных"""
+        return bool(
+            self.get('ok_application_key') and 
             self.get('ok_session_secret_key')
-        ])
+        )
     
     def print_config_summary(self):
         """Выводит краткую информацию о конфигурации"""
@@ -120,7 +120,10 @@ class SocialMediaParser:
         self.config = config
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Accept-Encoding': 'gzip, deflate, br',
         })
     
     def read_links_from_file(self, filename: str = "links.txt") -> List[str]:
@@ -239,7 +242,8 @@ class SocialMediaParser:
         patterns = [
             r'ok\.ru/([^/\?]+)/topic/(\d+)',
             r'ok\.ru/([^/\?]+)/status/(\d+)',
-            r'ok\.ru/(?:group)?(\d+)/topic/(\d+)'
+            r'ok\.ru/(?:group)?(\d+)/topic/(\d+)',
+            r'ok\.ru/(?:group)?(\d+)/status/(\d+)'
         ]
         
         for pattern in patterns:
@@ -272,7 +276,8 @@ class VKParser:
         self.api_token = None
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'application/json'
         })
     
     def setup_token(self):
@@ -316,44 +321,50 @@ class VKParser:
         print(f"\nПолучаю просмотры для {len(vk_posts)} VK постов...")
         
         try:
-            post_ids = [post['post_id'] for post in vk_posts]
-            
-            response = self.session.post(
-                'https://api.vk.com/method/wall.getById',
-                params={
-                    'access_token': self.api_token,
-                    'v': '5.199',
-                    'posts': ','.join(post_ids),
-                    'extended': 0
-                },
-                timeout=10
-            )
-            response.raise_for_status()
-            data = response.json()
-            
-            if 'error' in data:
-                print(f"Ошибка VK API: {data['error']['error_msg']}")
-                return 0, []
-            
-            posts = data.get('response', {}).get('items', [])
-            post_views = {}
-            
-            for post in posts:
-                post_key = f"{post.get('owner_id', 0)}_{post.get('id', 0)}"
-                views = post.get('views', {}).get('count', 0)
-                post_views[post_key] = views
-            
-            for i, vk_post in enumerate(vk_posts, 1):
-                post_id = vk_post['post_id']
-                views = post_views.get(post_id, 0)
-                total_views += views
+            # Группируем по 25 постов в одном запросе (лимит VK API)
+            batch_size = 25
+            for i in range(0, len(vk_posts), batch_size):
+                batch = vk_posts[i:i + batch_size]
+                post_ids = [post['post_id'] for post in batch]
                 
-                print(f"  [{i}/{len(vk_posts)}] VK: {vk_post['original_link']}: {views:,}")
+                response = self.session.post(
+                    'https://api.vk.com/method/wall.getById',
+                    params={
+                        'access_token': self.api_token,
+                        'v': '5.199',
+                        'posts': ','.join(post_ids),
+                        'extended': 0
+                    },
+                    timeout=10
+                )
+                response.raise_for_status()
+                data = response.json()
                 
-                vk_views_data.append({
-                    'link': vk_post['original_link'],
-                    'views': views
-                })
+                if 'error' in data:
+                    error_msg = data['error'].get('error_msg', 'Неизвестная ошибка')
+                    print(f"Ошибка VK API: {error_msg}")
+                    continue
+                
+                posts = data.get('response', {}).get('items', [])
+                post_views = {}
+                
+                for post in posts:
+                    post_key = f"{post.get('owner_id', 0)}_{post.get('id', 0)}"
+                    views = post.get('views', {}).get('count', 0)
+                    post_views[post_key] = views
+                
+                for j, vk_post in enumerate(batch, 1):
+                    post_id = vk_post['post_id']
+                    views = post_views.get(post_id, 0)
+                    total_views += views
+                    
+                    idx = i + j
+                    print(f"  [{idx}/{len(vk_posts)}] VK: {vk_post['original_link']}: {views:,}")
+                    
+                    vk_views_data.append({
+                        'link': vk_post['original_link'],
+                        'views': views
+                    })
             
             return total_views, vk_views_data
             
@@ -585,7 +596,9 @@ class TelegramParser:
                     'views': 0
                 })
             except Exception as e:
-                print(f"  [{i}/{len(telegram_posts)}] Ошибка: {type(e).__name__}: {str(e)[:100]}...")
+                error_type = type(e).__name__
+                error_msg = str(e)[:100]
+                print(f"  [{i}/{len(telegram_posts)}] Ошибка: {error_type}: {error_msg}...")
                 telegram_views_data.append({
                     'link': post_info['original_link'],
                     'views': 0
@@ -618,13 +631,31 @@ class OKParser:
     def __init__(self, config: ConfigManager):
         self.config = config
         self.session = requests.Session()
+        # Улучшенные заголовки для обхода защиты
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Cache-Control': 'max-age=0',
+            'DNT': '1',
+        })
+        # Добавляем куки для эмуляции реального браузера
+        self.session.cookies.update({
+            'tst': 'c',
+            'bp2': '6.1.3.1.1',
         })
         self.application_key = None
         self.access_token = None
         self.session_secret_key = None
         self.application_id = None
+        self.cache = {}  # Кэш для просмотров
         self.setup_api_credentials()
     
     def setup_api_credentials(self):
@@ -684,33 +715,31 @@ class OKParser:
         
         print(f"\nПолучаю просмотры для {len(ok_posts)} OK.ru постов...")
         
-        # Определяем, использовать ли API или только парсинг
-        use_api = self.config.has_ok_creds()
-        
-        if use_api:
-            print("Используется API OK.ru...")
-        else:
-            print("API не настроен, используется только парсинг HTML...")
-        
         for i, ok_post in enumerate(ok_posts, 1):
             url = ok_post['original_link']
+            cache_key = hashlib.md5(url.encode()).hexdigest()
             views = 0
             
-            try:
-                print(f"  [{i}/{len(ok_posts)}] Обработка: {url}")
-                
-                # Сначала пробуем API, если настроено
-                if use_api:
-                    views = self._get_views_via_api(ok_post)
-                
-                # Если API не сработал или не настроен, пробуем парсинг
-                if views == 0:
-                    views = self._get_views_via_parsing(url)
-                
-                print(f"     Найдено: {views:,} просмотров")
-                
-            except Exception as e:
-                print(f"     Ошибка: {e}")
+            # Проверяем кэш
+            if cache_key in self.cache:
+                views = self.cache[cache_key]
+                print(f"  [{i}/{len(ok_posts)}] Из кэша: {url}: {views:,} просмотров")
+            else:
+                try:
+                    print(f"  [{i}/{len(ok_posts)}] Обработка: {url}")
+                    
+                    # Пробуем все доступные методы по очереди
+                    views = self._try_all_methods(ok_post)
+                    
+                    if views == 0:
+                        print(f"     Не удалось получить данные. Возможно, пост скрыт или удален.")
+                    
+                    # Сохраняем в кэш
+                    self.cache[cache_key] = views
+                    
+                except Exception as e:
+                    print(f"     Ошибка: {e}")
+                    views = 0
             
             total_views += views
             ok_views_data.append({
@@ -723,26 +752,191 @@ class OKParser:
         
         return total_views, ok_views_data
     
-    def _get_views_via_api(self, ok_post: Dict) -> int:
-        """Получает просмотры через API OK.ru"""
+    def _try_all_methods(self, ok_post: Dict) -> int:
+        """Пробует все доступные методы для получения просмотров"""
+        url = ok_post['original_link']
+        
+        # Метод 1: Улучшенный парсинг HTML
+        views = self._get_views_via_advanced_parsing(url)
+        if views > 0:
+            return views
+        
+        # Метод 2: Если есть API данные, пробуем альтернативные методы API
+        if self.config.has_ok_creds():
+            views = self._get_views_via_api_alternative(ok_post)
+            if views > 0:
+                return views
+        
+        # Метод 3: Пробуем получить данные через мобильную версию
+        views = self._get_views_via_mobile_version(url)
+        if views > 0:
+            return views
+        
+        return 0
+    
+    def _get_views_via_advanced_parsing(self, url: str) -> int:
+        """Улучшенный парсинг HTML с различными подходами"""
         try:
-            group = ok_post['group']
-            topic_id = ok_post['topic_id']
+            # Сначала пробуем получить главную страницу для установки сессии
+            home_response = self.session.get('https://ok.ru', timeout=10)
             
-            # Создаем сигнатуру запроса (подпись)
+            # Теперь запрашиваем страницу с постом
+            response = self.session.get(url, timeout=15)
+            
+            if response.status_code == 200:
+                html_content = response.text
+                
+                # Сохраняем HTML для отладки
+                if "debug" in self.config.get('debug_mode', ''):
+                    with open(f'ok_debug_{int(time.time())}.html', 'w', encoding='utf-8') as f:
+                        f.write(html_content)
+                
+                # Пробуем различные методы парсинга
+                views = self._parse_with_beautifulsoup(html_content)
+                if views > 0:
+                    return views
+                
+                views = self._parse_with_regex(html_content)
+                if views > 0:
+                    return views
+                
+                views = self._parse_javascript_data(html_content)
+                if views > 0:
+                    return views
+            
+            return 0
+                
+        except Exception as e:
+            print(f"     Ошибка при парсинге: {e}")
+            return 0
+    
+    def _parse_with_beautifulsoup(self, html: str) -> int:
+        """Парсинг с использованием BeautifulSoup"""
+        soup = BeautifulSoup(html, 'html.parser')
+        
+        # Ищем все элементы с числами
+        all_elements = soup.find_all(string=re.compile(r'\d+'))
+        numbers = []
+        
+        for elem in all_elements:
+            text = elem.get_text(strip=True)
+            # Ищем числа в тексте
+            found_numbers = re.findall(r'\d[\d\s]*\d', text)
+            for num_str in found_numbers:
+                try:
+                    # Убираем пробелы и нецифровые символы
+                    clean_num = int(num_str.replace(' ', '').replace('\xa0', '').replace(',', ''))
+                    # Отсеиваем маленькие и слишком большие числа
+                    if 100 <= clean_num <= 1000000:
+                        numbers.append(clean_num)
+                except:
+                    continue
+        
+        # Если нашли подходящие числа, возвращаем среднее
+        if numbers:
+            numbers.sort()
+            # Берем медиану, чтобы исключить выбросы
+            median_index = len(numbers) // 2
+            return numbers[median_index]
+        
+        return 0
+    
+    def _parse_with_regex(self, html: str) -> int:
+        """Прямой парсинг HTML с помощью регулярных выражений"""
+        # Паттерны для поиска просмотров в OK.ru
+        patterns = [
+            # Формат: "1234 просмотров"
+            r'(\d[\d\s]*)\s*просмотр[а-яё]*',
+            # Формат: "Просмотров: 1234"
+            r'[Пп]росмотр[а-яё]*\s*[:;]\s*(\d[\d\s]*)',
+            # Формат в data-атрибутах
+            r'data-(?:view|count|stat)[-=:]\s*["\']?(\d+)',
+            # Формат в JavaScript объектах
+            r'(?:viewCount|views|count|visitors)\s*[:=]\s*["\']?(\d+)',
+            # Формат в мета-тегах
+            r'<meta[^>]+(?:view|count|stat)[^>]+content=["\'](\d+)["\']',
+        ]
+        
+        for pattern in patterns:
+            matches = re.findall(pattern, html, re.IGNORECASE | re.MULTILINE)
+            for match in matches:
+                try:
+                    if isinstance(match, tuple):
+                        match = match[0]
+                    clean_num = int(str(match).replace(' ', '').replace('\xa0', '').replace(',', ''))
+                    if 10 <= clean_num <= 1000000:
+                        return clean_num
+                except:
+                    continue
+        
+        return 0
+    
+    def _parse_javascript_data(self, html: str) -> int:
+        """Парсинг JavaScript данных на странице"""
+        # Ищем JSON данные в JavaScript
+        json_patterns = [
+            r'window\.__INITIAL_STATE__\s*=\s*({.*?});',
+            r'window\.__data\s*=\s*({.*?});',
+            r'var\s+data\s*=\s*({.*?});',
+            r'JSON\.parse\(\s*["\']({.*?})["\']\s*\)',
+        ]
+        
+        for pattern in json_patterns:
+            matches = re.findall(pattern, html, re.DOTALL)
+            for match in matches:
+                try:
+                    data = json.loads(match)
+                    # Рекурсивно ищем числа, которые могут быть просмотрами
+                    views = self._find_views_in_structure(data)
+                    if views > 0:
+                        return views
+                except:
+                    continue
+        
+        return 0
+    
+    def _find_views_in_structure(self, data) -> int:
+        """Рекурсивно ищет просмотры в структуре данных"""
+        if isinstance(data, dict):
+            # Сначала проверяем ключи, которые могут содержать просмотры
+            for key in ['views', 'viewCount', 'count', 'visitors', 'view_count']:
+                if key in data:
+                    value = data[key]
+                    if isinstance(value, (int, float)):
+                        if 10 <= value <= 1000000:
+                            return int(value)
+                    elif isinstance(value, str) and value.isdigit():
+                        num = int(value)
+                        if 10 <= num <= 1000000:
+                            return num
+            
+            # Рекурсивно проверяем все значения
+            for value in data.values():
+                result = self._find_views_in_structure(value)
+                if result > 0:
+                    return result
+        
+        elif isinstance(data, list):
+            for item in data:
+                result = self._find_views_in_structure(item)
+                if result > 0:
+                    return result
+        
+        return 0
+    
+    def _get_views_via_api_alternative(self, ok_post: Dict) -> int:
+        """Альтернативные методы API OK.ru"""
+        try:
+            # Попробуем использовать метод 'users.getInfo' для получения информации о группе
             params = {
                 'application_key': self.application_key,
                 'format': 'json',
-                'method': 'mediatopic.get',
-                'access_token': self.access_token or '',  # Может быть пустым
-                'ids': f"{topic_id}",
+                'method': 'users.getInfo',
+                'access_token': self.access_token or '',
+                'uids': ok_post['group'],
+                'fields': 'counters'
             }
             
-            # Если группа числовая, добавляем group_id
-            if ok_post['group_type'] == 'group' and group.isdigit():
-                params['gid'] = group
-            
-            # Генерируем подпись
             sig = self._generate_signature(params)
             params['sig'] = sig
             
@@ -754,38 +948,58 @@ class OKParser:
             
             if response.status_code == 200:
                 data = response.json()
-                
-                # Логируем ответ для отладки
-                if data:
-                    print(f"     API ответ получен (длина: {len(str(data))} символов)")
-                
-                if isinstance(data, dict):
-                    # Ищем просмотры в разных полях ответа
-                    for key in ['views', 'view_count', 'visitors', 'visits']:
-                        if key in data and data[key]:
-                            try:
-                                views = int(data[key])
-                                if views > 0:
+                # Ищем счетчики просмотров
+                if isinstance(data, list) and len(data) > 0:
+                    user_data = data[0]
+                    if 'counters' in user_data:
+                        counters = user_data['counters']
+                        for key in ['videos', 'photos', 'topics']:
+                            if key in counters:
+                                views = counters[key]
+                                if isinstance(views, int) and views > 0:
                                     return views
-                            except:
-                                continue
-                    
-                    # Ищем вложенные объекты
-                    if 'media' in data and isinstance(data['media'], list) and len(data['media']) > 0:
-                        media = data['media'][0]
-                        for key in ['views', 'view_count', 'visitors', 'visits']:
-                            if key in media and media[key]:
-                                try:
-                                    views = int(media[key])
-                                    if views > 0:
-                                        return views
-                                except:
-                                    continue
-                
             return 0
             
         except Exception as e:
-            print(f"     Ошибка API: {e}")
+            return 0
+    
+    def _get_views_via_mobile_version(self, url: str) -> int:
+        """Пробуем получить данные через мобильную версию сайта"""
+        try:
+            # Преобразуем URL в мобильную версию
+            mobile_url = url.replace('ok.ru/', 'm.ok.ru/')
+            
+            # Мобильные заголовки
+            mobile_headers = {
+                'User-Agent': 'Mozilla/5.0 (Linux; Android 10; SM-G960F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.91 Mobile Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            }
+            
+            response = self.session.get(mobile_url, headers=mobile_headers, timeout=15)
+            
+            if response.status_code == 200:
+                html = response.text
+                
+                # Ищем просмотры в мобильной версии
+                mobile_patterns = [
+                    r'(\d+)\s*просмотр',
+                    r'<span[^>]*class="[^"]*count[^"]*"[^>]*>(\d+)</span>',
+                    r'data-count=["\']?(\d+)["\']?',
+                ]
+                
+                for pattern in mobile_patterns:
+                    matches = re.findall(pattern, html, re.IGNORECASE)
+                    for match in matches:
+                        try:
+                            views = int(match)
+                            if 10 <= views <= 1000000:
+                                return views
+                        except:
+                            continue
+            
+            return 0
+            
+        except Exception as e:
             return 0
     
     def _generate_signature(self, params: Dict) -> str:
@@ -809,98 +1023,16 @@ class OKParser:
             return md5_hash.lower()
         except:
             return ""
-    
-    def _get_views_via_parsing(self, url: str) -> int:
-        """Парсит просмотры со страницы"""
-        try:
-            response = self.session.get(url, timeout=15)
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.text, 'html.parser')
-                
-                # Метод 1: Ищем элементы с классами, содержащими "count", "view", "stats"
-                count_selectors = [
-                    {'class_': re.compile(r'media-layer_stats', re.I)},
-                    {'class_': re.compile(r'topic-stats', re.I)},
-                    {'class_': re.compile(r'stats-layer', re.I)},
-                    {'class_': re.compile(r'media-layer__stats', re.I)},
-                    {'class_': re.compile(r'widget_count', re.I)},
-                    {'class_': re.compile(r'navMenuCount', re.I)},
-                ]
-                
-                for selector in count_selectors:
-                    elements = soup.find_all(**selector)
-                    for elem in elements:
-                        text = elem.get_text(strip=True)
-                        # Ищем числа в тексте
-                        numbers = re.findall(r'\d+', text.replace(' ', ''))
-                        for num_str in numbers:
-                            try:
-                                num = int(num_str)
-                                # Фильтруем: просмотры обычно > 10 и < 10 000 000
-                                if 10 <= num <= 10000000:
-                                    return num
-                            except:
-                                continue
-                
-                # Метод 2: Ищем по текстовым паттернам во всем HTML
-                html_text = str(soup)
-                
-                # Паттерны для поиска просмотров
-                patterns = [
-                    r'(\d+(?:\s*\d+)*)\s*просмотр[а-я]{0,4}',
-                    r'(\d+(?:\s*\d+)*)\s*просмотров',
-                    r'(\d+(?:\s*\d+)*)\s*просмотра',
-                ]
-                
-                for pattern in patterns:
-                    matches = re.findall(pattern, html_text, re.IGNORECASE)
-                    for match in matches:
-                        try:
-                            clean_num = int(match.replace(' ', '').replace(',', ''))
-                            # Фильтруем маленькие числа
-                            if 100 <= clean_num <= 10000000:
-                                return clean_num
-                        except:
-                            continue
-                
-                # Метод 3: Анализируем все числа на странице
-                all_numbers = []
-                
-                # Ищем все элементы с числами
-                number_elements = soup.find_all(string=re.compile(r'\d+'))
-                for elem in number_elements:
-                    text = str(elem).strip()
-                    if text and len(text) < 100:
-                        # Извлекаем числа
-                        numbers = re.findall(r'\d+', text.replace(' ', ''))
-                        for num_str in numbers:
-                            if num_str.isdigit():
-                                num = int(num_str)
-                                # Отсеиваем очевидно неподходящие числа
-                                if 100 <= num <= 1000000:
-                                    all_numbers.append(num)
-                
-                # Если нашли подходящие числа, берем медиану
-                if all_numbers:
-                    all_numbers.sort()
-                    median_index = len(all_numbers) // 2
-                    return all_numbers[median_index]
-                
-                return 0
-            else:
-                return 0
-                
-        except Exception as e:
-            print(f"     Ошибка парсинга: {e}")
-            return 0
 
 def main():
     """Основная функция программы"""
     print("="*50)
     print("ПАРСЕР ПРОСМОТРОВ ДЛЯ VK, TELEGRAM И OK.RU")
     print("="*50)
+    print("Версия 2.0 - с улучшенной обработкой OK.ru")
+    print("="*50)
     
-    # Инициализация менеджера конфигурации с пустыми данными
+    # Инициализация менеджера конфигурации
     initial_config = {
         "telegram_api_id": "",
         "telegram_api_hash": "",
@@ -946,6 +1078,9 @@ def main():
     
     # VK (только если есть VK посты)
     if vk_posts:
+        print(f"\n{'='*50}")
+        print("ОБРАБОТКА VK")
+        print(f"{'='*50}")
         vk_views, vk_details = vk_parser.get_views(vk_posts)
         total_views += vk_views
         detailed_results.extend(vk_details)
@@ -965,9 +1100,25 @@ def main():
     
     # OK.ru (только если есть OK.ru посты)
     if ok_posts:
+        print(f"\n{'='*50}")
+        print("ОБРАБОТКА OK.RU")
+        print(f"{'='*50}")
+        print("Внимание: OK.ru может иметь ограничения на доступ к данным.")
+        print("Пробуем использовать улучшенные методы парсинга...")
+        print(f"{'='*50}")
+        
         ok_views, ok_details = ok_parser.get_views(ok_posts)
         total_views += ok_views
         detailed_results.extend(ok_details)
+        
+        # Если для OK.ru все еще 0 просмотров, выводим предупреждение
+        if ok_views == 0:
+            print("\n⚠️  ВНИМАНИЕ: Не удалось получить просмотры для OK.ru")
+            print("Возможные причины:")
+            print("1. Посты могут быть скрыты или удалены")
+            print("2. OK.ru может блокировать автоматические запросы")
+            print("3. Требуется авторизация в OK.ru для просмотра статистики")
+            print("4. Структура сайта могла измениться")
     
     # Вывод результата
     print("\n" + "="*50)
@@ -981,18 +1132,40 @@ def main():
         
         # Сохраняем детальные результаты в файл
         try:
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            results_file = f'results_{timestamp}.json'
+            
+            results_data = {
+                'total_views': total_views,
+                'formatted_total': formatted_total,
+                'timestamp': time.strftime("%Y-%m-%d %H:%M:%S"),
+                'platform_summary': {
+                    'vk': len(vk_posts),
+                    'vk_views': sum(item['views'] for item in detailed_results if 'vk.com' in item['link']),
+                    'telegram': len(telegram_posts),
+                    'telegram_views': sum(item['views'] for item in detailed_results if 't.me' in item['link']),
+                    'ok': len(ok_posts),
+                    'ok_views': sum(item['views'] for item in detailed_results if 'ok.ru' in item['link']),
+                },
+                'detailed_results': detailed_results
+            }
+            
+            with open(results_file, 'w', encoding='utf-8') as f:
+                json.dump(results_data, f, ensure_ascii=False, indent=2)
+            print(f"\nДетальные результаты сохранены в файл '{results_file}'")
+            
+            # Также сохраняем в стандартный файл для совместимости
             with open('results.json', 'w', encoding='utf-8') as f:
-                json.dump({
-                    'total_views': total_views,
-                    'formatted_total': formatted_total,
-                    'detailed_results': detailed_results,
-                    'timestamp': time.time()
-                }, f, ensure_ascii=False, indent=2)
-            print(f"\nДетальные результаты сохранены в файл 'results.json'")
+                json.dump(results_data, f, ensure_ascii=False, indent=2)
+                
         except Exception as e:
             print(f"Не удалось сохранить результаты: {e}")
     else:
         print("Не удалось получить данные по просмотрам")
+    
+    print("\n" + "="*50)
+    print("ОБРАБОТКА ЗАВЕРШЕНА")
+    print("="*50)
 
 if __name__ == "__main__":
     main()
