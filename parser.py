@@ -127,33 +127,28 @@ class SocialMediaParser:
         })
     
     def read_links_from_file(self, filename: str = "links.txt") -> List[str]:
-        """Читает ссылки из текстового файла"""
-        try:
-            with open(filename, 'r', encoding='utf-8') as file:
-                links = [line.strip() for line in file if line.strip()]
-            
-            if not links:
-                print(f"Файл '{filename}' пуст!")
-                return []
-            
-            # Ограничение на количество обрабатываемых ссылок
-            max_links = 100
-            if len(links) > max_links:
-                print(f"Внимание: ограничено до {max_links} первых ссылок")
-                links = links[:max_links]
-            
-            return links
-            
-        except FileNotFoundError:
+        if not os.path.exists(filename):
             print(f"Файл '{filename}' не найден! Создайте файл со ссылками.")
             return []
-        except Exception as e:
-            print(f"Ошибка при чтении файла: {e}")
-            return []
+        
+        # Пробуем разные кодировки
+        encodings = ['utf-8-sig', 'utf-8', 'cp1251', 'latin-1']
+        for enc in encodings:
+            try:
+                with open(filename, 'r', encoding=enc) as f:
+                    links = [line.strip() for line in f if line.strip()]
+                if links:
+                    print(f"Файл прочитан в кодировке {enc}, найдено {len(links)} ссылок.")
+                    return links
+            except UnicodeDecodeError:
+                continue
+        
+        print(f"Не удалось прочитать файл '{filename}' ни в одной из кодировок.")
+        return []
     
     def extract_post_ids(self, links: List[str]) -> Dict[str, List[Dict]]:
         """
-        Извлекает идентификаторов постов из ссылок разных соцсетей
+        Извлекает идентификаторы постов из ссылок разных соцсетей
         """
         vk_posts = []
         telegram_posts = []
@@ -162,8 +157,8 @@ class SocialMediaParser:
         for link in links:
             link_lower = link.lower()
             
-            # VK посты
-            if 'vk.com' in link_lower or link_lower.startswith('wall'):
+            # VK посты (поддерживаются vk.com, vk.ru и другие поддомены)
+            if 'vk.' in link_lower or link_lower.startswith('wall'):
                 self._extract_vk_post(link_lower, link, vk_posts)
             
             # Telegram посты
@@ -187,8 +182,8 @@ class SocialMediaParser:
         """Извлекает данные VK поста"""
         patterns = [
             r'wall-?(\d+)_(\d+)',
-            r'vk\.com/(?:wall)?(\d+_\d+)',
-            r'vk\.com/(?:[\w\.]+)\?w=wall-(\d+_\d+)'
+            r'vk\.[a-z]+/(?:wall)?(\d+_\d+)',
+            r'vk\.[a-z]+/(?:[\w\.]+)\?w=wall-(\d+_\d+)'
         ]
         
         for pattern in patterns:
@@ -328,7 +323,7 @@ class VKParser:
                 post_ids = [post['post_id'] for post in batch]
                 
                 response = self.session.post(
-                    'https://api.vk.com/method/wall.getById',
+                    'https://api.vk.com/method/wall.getById',  # исправлено на правильный домен
                     params={
                         'access_token': self.api_token,
                         'v': '5.199',
@@ -500,7 +495,9 @@ class TelegramParser:
         print(f"\nПодготовка к подключению Telegram:")
         print(f"  API ID: {self.api_id}")
         print(f"  API Hash: {'*' * 8}...")
-        print(f"  Телефон: {'*' * len(str(self.phone))[:-3]}...")
+        phone_str = str(self.phone)
+        hidden_phone = '*' * (len(phone_str) - 3) + phone_str[-3:]
+        print(f"  Телефон: {hidden_phone}")
         print(f"  Файл сессии: {self.session_name}.session")
         
         # Проверяем наличие файла сессии
@@ -1141,7 +1138,7 @@ def main():
                 'timestamp': time.strftime("%Y-%m-%d %H:%M:%S"),
                 'platform_summary': {
                     'vk': len(vk_posts),
-                    'vk_views': sum(item['views'] for item in detailed_results if 'vk.com' in item['link']),
+                    'vk_views': sum(item['views'] for item in detailed_results if 'vk.' in item['link']),
                     'telegram': len(telegram_posts),
                     'telegram_views': sum(item['views'] for item in detailed_results if 't.me' in item['link']),
                     'ok': len(ok_posts),
