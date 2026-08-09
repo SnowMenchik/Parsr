@@ -29,7 +29,7 @@
 
 2. Установите зависимости:
    ```bash
-pip install -r requirements.txt
+   pip install -r requirements.txt
 Для более быстрой работы Telethon (опционально):
 pip install cryptg
 
